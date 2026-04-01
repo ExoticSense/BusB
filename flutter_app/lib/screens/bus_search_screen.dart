@@ -1,18 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
 
-class BusInfo {
-  final String name;
-  final String number;
-  final double distanceKm;
-
-  const BusInfo({
-    required this.name,
-    required this.number,
-    required this.distanceKm,
-  });
-}
+import '../models/bus_info.dart';
+import 'bus_route_details_screen.dart';
+import 'settings_screen.dart';
 
 class BusSearchScreen extends StatefulWidget {
   const BusSearchScreen({super.key});
@@ -23,12 +16,108 @@ class BusSearchScreen extends StatefulWidget {
 
 class _BusSearchScreenState extends State<BusSearchScreen> {
   bool _isFetchingLocation = false;
+  bool _isSearchingBus = false;
+  bool _isSearchingTrips = false;
+
   String? _locationLabel;
   String? _errorMessage;
-  final TextEditingController _busSearchController = TextEditingController();
-  BusInfo? _searchedBus;
 
-  Future<void> _fetchLocationAndNearbyBuses() async {
+  final TextEditingController _fromController = TextEditingController();
+  final TextEditingController _destinationController = TextEditingController();
+  final TextEditingController _busSearchController = TextEditingController();
+
+  List<BusInfo> _trackedBuses = [];
+
+  @override
+  void dispose() {
+    _fromController.dispose();
+    _destinationController.dispose();
+    _busSearchController.dispose();
+    super.dispose();
+  }
+
+  String _normalizeText(String value) {
+    return value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  List<String> _buildRoutePoints({
+    String? start,
+    List<String> stops = const [],
+    String? end,
+  }) {
+    final List<String> routePoints = [];
+
+    if (start != null && start.trim().isNotEmpty) {
+      routePoints.add(start.trim());
+    }
+
+    for (final stop in stops) {
+      if (stop.trim().isNotEmpty) {
+        routePoints.add(stop.trim());
+      }
+    }
+
+    if (end != null && end.trim().isNotEmpty) {
+      routePoints.add(end.trim());
+    }
+
+    return routePoints;
+  }
+
+  BusInfo _mapBusFromFirestore(
+    String busId,
+    Map<String, dynamic> data, {
+    double distanceKm = 0,
+  }) {
+    final stops =
+        (data['stops'] as List?)?.map((e) => e.toString()).toList() ?? [];
+
+    final busNumber =
+        (data['busNumber'] as String?)?.trim().toUpperCase() ?? 'UNKNOWN';
+
+    return BusInfo(
+      id: busId,
+      name: (data['busName'] as String?)?.trim().isNotEmpty == true
+          ? (data['busName'] as String).trim()
+          : (data['routeName'] as String?)?.trim().isNotEmpty == true
+          ? (data['routeName'] as String).trim()
+          : 'Bus $busNumber',
+      number: busNumber,
+      distanceKm: distanceKm,
+      start: data['start'] as String?,
+      end: data['end'] as String?,
+      stops: stops,
+    );
+  }
+
+  bool _doesBusMatchRoute({
+    required String from,
+    required String destination,
+    required String? start,
+    required List<String> stops,
+    required String? end,
+  }) {
+    final routePoints = _buildRoutePoints(start: start, stops: stops, end: end);
+
+    final normalizedRoute = routePoints
+        .map((point) => _normalizeText(point))
+        .toList();
+
+    final normalizedFrom = _normalizeText(from);
+    final normalizedDestination = _normalizeText(destination);
+
+    final fromIndex = normalizedRoute.indexOf(normalizedFrom);
+    final destinationIndex = normalizedRoute.indexOf(normalizedDestination);
+
+    if (fromIndex == -1 || destinationIndex == -1) {
+      return false;
+    }
+
+    return fromIndex < destinationIndex;
+  }
+
+  /// GET USER LOCATION
+  Future<void> _fetchCurrentAddress() async {
     if (_isFetchingLocation) return;
 
     setState(() {
@@ -43,24 +132,66 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
         permission = await Geolocator.requestPermission();
       }
 
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        setState(() {
-          _errorMessage = 'Location permission denied.';
-        });
+      if (permission == LocationPermission.denied) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location permission denied.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
         return;
       }
 
-      final position = await Geolocator.getCurrentPosition();
+      if (permission == LocationPermission.deniedForever) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location permission permanently denied. Enable it from settings.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
 
-      setState(() {
-        _locationLabel =
-            '${position.latitude.toStringAsFixed(3)}, ${position.longitude.toStringAsFixed(3)}';
-      });
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      final placemarks = await placemarkFromCoordinates(
+        position.latitude,
+        position.longitude,
+      );
+
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
+        
+        String streetAddress = '';
+        if (place.thoroughfare != null && place.thoroughfare!.isNotEmpty) {
+          streetAddress += place.thoroughfare!;
+        }
+        if (place.subLocality != null && place.subLocality!.isNotEmpty) {
+          if (streetAddress.isNotEmpty) streetAddress += ', ';
+          streetAddress += place.subLocality!;
+        }
+        
+        if (streetAddress.isEmpty) {
+          streetAddress = place.name ?? place.locality ?? '';
+        }
+
+        setState(() {
+          _fromController.text = streetAddress;
+          _locationLabel = streetAddress.isNotEmpty ? streetAddress : 'Address not found';
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to fetch address: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -70,27 +201,32 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
     }
   }
 
+  // Logout logic moved to SettingsScreen
+
   Future<void> _searchBusByNumber() async {
-    final query = _busSearchController.text.trim().toUpperCase();
+    final query = _busSearchController.text.trim();
+
     if (query.isEmpty) {
       setState(() {
-        _searchedBus = null;
+        _trackedBuses = [];
         _errorMessage = null;
       });
       return;
     }
 
     setState(() {
+      _isSearchingBus = true;
       _errorMessage = null;
-      _searchedBus = null;
+      _trackedBuses = [];
     });
 
     try {
       final snap = await FirebaseFirestore.instance
           .collection('buses')
-          .where('busNumber', isEqualTo: query)
+          .where('busNumber', isEqualTo: query.toUpperCase())
           .limit(1)
           .get();
+
       if (snap.docs.isEmpty) {
         setState(() {
           _errorMessage = 'No bus found with that number.';
@@ -99,19 +235,90 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
       }
 
       final data = snap.docs.first.data();
+
       setState(() {
-        _searchedBus = BusInfo(
-          name: data['routeName'] as String? ??
-              data['busName'] as String? ??
-              'Bus $query',
-          number: data['busNumber'] as String? ?? query,
-          distanceKm: 0,
-        );
+        _trackedBuses = [_mapBusFromFirestore(snap.docs.first.id, data)];
       });
     } catch (e) {
       setState(() {
         _errorMessage = 'Failed to fetch bus details. Please try again.';
       });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSearchingBus = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _searchTrips() async {
+    final from = _fromController.text.trim();
+    final destination = _destinationController.text.trim();
+
+    if (from.isEmpty || destination.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter both starting point and destination.';
+      });
+      return;
+    }
+
+    if (_normalizeText(from) == _normalizeText(destination)) {
+      setState(() {
+        _errorMessage = 'Starting point and destination cannot be the same.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearchingTrips = true;
+      _errorMessage = null;
+      _trackedBuses = [];
+    });
+
+    try {
+      final snap = await FirebaseFirestore.instance.collection('buses').get();
+
+      final List<BusInfo> matchedBuses = [];
+
+      for (final doc in snap.docs) {
+        final data = doc.data();
+
+        final stops =
+            (data['stops'] as List?)?.map((e) => e.toString()).toList() ?? [];
+
+        final start = data['start'] as String?;
+        final end = data['end'] as String?;
+
+        final matches = _doesBusMatchRoute(
+          from: from,
+          destination: destination,
+          start: start,
+          stops: stops,
+          end: end,
+        );
+
+        if (matches) {
+          matchedBuses.add(_mapBusFromFirestore(doc.id, data));
+        }
+      }
+
+      setState(() {
+        _trackedBuses = matchedBuses;
+        if (matchedBuses.isEmpty) {
+          _errorMessage = 'No buses found for this route.';
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Failed to search trips. Please try again.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSearchingTrips = false;
+        });
+      }
     }
   }
 
@@ -152,7 +359,7 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                       children: [
                         InkWell(
                           borderRadius: BorderRadius.circular(30),
-                          onTap: _fetchLocationAndNearbyBuses,
+                          onTap: _fetchCurrentAddress,
                           child: Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 16,
@@ -192,7 +399,16 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                           ),
                         ),
                         const SizedBox(width: 10),
-                        const Icon(Icons.settings, color: Colors.white70),
+                        IconButton(
+                          icon: const Icon(Icons.settings, color: Colors.white70),
+                          tooltip: 'Settings',
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                            );
+                          },
+                        ),
                       ],
                     ),
                   ],
@@ -206,9 +422,10 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                   ),
                   child: Column(
                     children: [
-                      const TextField(
-                        style: TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
+                      TextField(
+                        controller: _fromController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
                           hintText: 'From',
                           hintStyle: TextStyle(color: Colors.white54),
                           border: InputBorder.none,
@@ -219,9 +436,10 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                         ),
                       ),
                       const Divider(color: Colors.white24),
-                      const TextField(
-                        style: TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
+                      TextField(
+                        controller: _destinationController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
                           hintText: 'Destination',
                           hintStyle: TextStyle(color: Colors.white54),
                           border: InputBorder.none,
@@ -239,11 +457,20 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                               borderRadius: BorderRadius.circular(15),
                             ),
                           ),
-                          onPressed: () {},
-                          child: const Text(
-                            'Search Trips',
-                            style: TextStyle(color: Colors.white),
-                          ),
+                          onPressed: _isSearchingTrips ? null : _searchTrips,
+                          child: _isSearchingTrips
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Text(
+                                  'Search Trips',
+                                  style: TextStyle(color: Colors.white),
+                                ),
                         ),
                       ),
                     ],
@@ -277,6 +504,7 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                         child: TextField(
                           controller: _busSearchController,
                           style: const TextStyle(color: Colors.white),
+                          textCapitalization: TextCapitalization.characters,
                           decoration: const InputDecoration(
                             hintText: 'Search by Bus No.',
                             hintStyle: TextStyle(color: Colors.white54),
@@ -285,30 +513,37 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                           onSubmitted: (_) => _searchBusByNumber(),
                         ),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.arrow_forward_ios,
-                            color: Colors.white54, size: 18),
-                        onPressed: _searchBusByNumber,
-                      ),
+                      _isSearchingBus
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white54,
+                              ),
+                            )
+                          : IconButton(
+                              icon: const Icon(
+                                Icons.arrow_forward_ios,
+                                color: Colors.white54,
+                                size: 18,
+                              ),
+                              onPressed: _searchBusByNumber,
+                            ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 30),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: const [
-                    Text(
-                      'Tracking Buses',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
+                const Text(
+                  'Tracking Buses',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
                 ),
                 const SizedBox(height: 20),
-                if (_searchedBus == null)
+                if (_trackedBuses.isEmpty)
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(18),
@@ -332,7 +567,7 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                         const SizedBox(width: 15),
                         const Expanded(
                           child: Text(
-                            'Search for a bus number to see route and status here.',
+                            'Search for a bus number or enter a route to see matching buses here.',
                             style: TextStyle(
                               color: Colors.white54,
                               fontSize: 16,
@@ -343,7 +578,11 @@ class _BusSearchScreenState extends State<BusSearchScreen> {
                     ),
                   )
                 else
-                  _BusCard(bus: _searchedBus!),
+                  Column(
+                    children: _trackedBuses
+                        .map((bus) => _BusCard(bus: bus))
+                        .toList(),
+                  ),
                 const SizedBox(height: 30),
               ],
             ),
@@ -361,51 +600,87 @@ class _BusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 15),
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2C2C2C),
-              borderRadius: BorderRadius.circular(15),
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => BusRouteDetailsScreen(bus: bus)),
+        );
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 15),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2C2C2C),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: const Icon(Icons.directions_bus, color: Colors.white),
             ),
-            child: const Icon(Icons.directions_bus, color: Colors.white),
-          ),
-          const SizedBox(width: 15),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  bus.name,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
+            const SizedBox(width: 15),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    bus.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Bus No: ${bus.number}',
-                  style: const TextStyle(color: Colors.white54),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${bus.distanceKm.toStringAsFixed(1)} km away',
-                  style: const TextStyle(color: Colors.white38, fontSize: 12),
-                ),
-              ],
+                  const SizedBox(height: 4),
+                  Text(
+                    'Bus No: ${bus.number}',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
+                  if (bus.start != null && bus.end != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Route: ${bus.start} → ${bus.end}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                  if (bus.stops.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Stops: ${bus.stops.join(', ')}',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 12,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Text(
+                    '${bus.distanceKm.toStringAsFixed(1)} km away',
+                    style: const TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ],
+              ),
             ),
-          ),
-          const Icon(Icons.arrow_forward_ios, color: Colors.white54, size: 16),
-        ],
+            const Icon(
+              Icons.arrow_forward_ios,
+              color: Colors.white54,
+              size: 16,
+            ),
+          ],
+        ),
       ),
     );
   }

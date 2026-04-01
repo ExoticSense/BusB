@@ -1,16 +1,56 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'add_bus_screen.dart';
 import 'driver_route_screen.dart';
+import 'role_selection_screen.dart';
 
 class DriverBusDashboardScreen extends StatelessWidget {
   const DriverBusDashboardScreen({super.key});
 
+  void _logout(BuildContext context) async {
+    final bool? shouldLogout = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        title: const Text('Logout', style: TextStyle(color: Colors.white)),
+        content: const Text('Are you sure you want to log out?', style: TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Logout', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldLogout != true) return;
+
+    // Fire and forget the strict sign out to avoid blocking UI or context unmounting
+    FirebaseAuth.instance.signOut();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('user_role');
+    
+    if (!context.mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
+      (route) => false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
+    final uid = user?.uid ?? '';
+    final email = user?.email ?? '';
 
     return Scaffold(
       body: Container(
@@ -26,7 +66,76 @@ class DriverBusDashboardScreen extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: Column(
               children: [
+                const SizedBox(height: 16),
+
+                /// DRIVER INFO CARD
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0B1120),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white.withOpacity(0.06)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: Colors.blueAccent.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(Icons.person, color: Colors.white),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Driver',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              email.isEmpty ? uid : email,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'uid: $uid',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white38,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Logout',
+                        icon: const Icon(Icons.logout, color: Colors.white70),
+                        onPressed: () {
+                          _logout(context);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+
                 const SizedBox(height: 24),
+
+                /// TITLE
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -64,7 +173,9 @@ class DriverBusDashboardScreen extends StatelessWidget {
                     ),
                   ],
                 ),
+
                 const SizedBox(height: 8),
+
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -72,7 +183,10 @@ class DriverBusDashboardScreen extends StatelessWidget {
                     style: TextStyle(color: Colors.white70, fontSize: 13),
                   ),
                 ),
+
                 const SizedBox(height: 24),
+
+                /// BUS LIST
                 Expanded(
                   child: user == null
                       ? const Center(
@@ -95,6 +209,7 @@ class DriverBusDashboardScreen extends StatelessWidget {
                                 ),
                               );
                             }
+
                             if (snapshot.hasError) {
                               return const Center(
                                 child: Text(
@@ -103,7 +218,9 @@ class DriverBusDashboardScreen extends StatelessWidget {
                                 ),
                               );
                             }
+
                             final docs = snapshot.data?.docs ?? [];
+
                             if (docs.isEmpty) {
                               return const Center(
                                 child: Text(
@@ -116,6 +233,7 @@ class DriverBusDashboardScreen extends StatelessWidget {
                                 ),
                               );
                             }
+
                             return ListView.separated(
                               itemCount: docs.length,
                               separatorBuilder: (_, _) =>
@@ -123,12 +241,13 @@ class DriverBusDashboardScreen extends StatelessWidget {
                               itemBuilder: (context, index) {
                                 final data = docs[index].data();
                                 final id = docs[index].id;
+
                                 final busName =
-                                    data['busName'] as String? ?? 'Unnamed bus';
-                                final busNumber =
-                                    data['busNumber'] as String? ?? 'N/A';
+                                    data['busName'] ?? 'Unnamed bus';
+                                final busNumber = data['busNumber'] ?? 'N/A';
                                 final routeName =
-                                    data['routeName'] as String? ?? 'No route';
+                                    data['routeName'] ?? 'No route';
+
                                 return _BusListTile(
                                   busId: id,
                                   busName: busName,
@@ -145,6 +264,7 @@ class DriverBusDashboardScreen extends StatelessWidget {
           ),
         ),
       ),
+
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: Colors.blueAccent,
         onPressed: () {
@@ -194,7 +314,7 @@ class _BusListTile extends StatelessWidget {
         decoration: BoxDecoration(
           color: const Color(0xFF0B1120),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          border: Border.all(color: Colors.white.withOpacity(0.06)),
         ),
         child: Row(
           children: [
@@ -202,7 +322,7 @@ class _BusListTile extends StatelessWidget {
               width: 46,
               height: 46,
               decoration: BoxDecoration(
-                color: Colors.blueAccent.withValues(alpha: 0.2),
+                color: Colors.blueAccent.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: const Icon(
